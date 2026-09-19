@@ -1,0 +1,41 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: mysql-server
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: appdb
+      MYSQL_USER: appuser
+      MYSQL_PASSWORD: apppass
+    ports:
+      - "3306:3306"      # optional: expose to the host
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./init:/docker-entrypoint-initdb.d:ro   # optional: .sql/.sh run on first start
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - dbnet
+
+  mysql-client:
+    image: mysql:8.4
+    container_name: mysql-client
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PWD: rootpass      # picked up automatically by the mysql CLI
+    entrypoint: ["sleep", "infinity"]   # keep the container alive; exec into it
+    networks:
+      - dbnet
+
+volumes:
+  mysql-data:
+
+networks:
+  dbnet:
