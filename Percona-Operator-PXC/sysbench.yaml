@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sysbench
+  labels:
+    app: sysbench
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sysbench
+  template:
+    metadata:
+      labels:
+        app: sysbench
+    spec:
+      # Load generator: keep it off the PXC nodes if there is room.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/component: pxc
+      containers:
+        - name: sysbench
+          # perconalab/sysbench is amd64-only; ubuntu ships an arm64 sysbench
+          # built against libmysqlclient21, which speaks caching_sha2_password.
+          image: ubuntu:24.04
+          env:
+            - name: MYSQL_HOST
+              value: cluster1-haproxy
+            - name: MYSQL_PORT
+              value: "3306"
+            - name: MYSQL_USER
+              value: root
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cluster1-secrets
+                  key: root
+            - name: MYSQL_DB
+              value: sbtest
+            - name: TABLES
+              value: "10"
+            - name: TABLE_SIZE
+              value: "10000"
+            - name: THREADS
+              value: "4"
+            # Transactions per second ceiling; 0 disables throttling.
+            - name: RATE
+              value: "20"
+            - name: WORKLOAD
+              value: oltp_read_write
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends ca-certificates sysbench mysql-client-core-8.0
+
+              # Connections are unencrypted: sysbench 1.0.20 as packaged by Ubuntu
+              # fails SSL_CTX_set_default_verify_paths, so --mysql-ssl=on cannot
+              # connect at all. libmysqlclient21 still authenticates against
+              # caching_sha2_password over plaintext via RSA key exchange.
+              MYSQL="mysql --host=${MYSQL_HOST} --port=${MYSQL_PORT} --user=${MYSQL_USER} --password=${MYSQL_PASSWORD}"
+
+              echo "waiting for ${MYSQL_HOST}:${MYSQL_PORT} ..."
+              until ${MYSQL} -N -e 'SELECT 1' >/dev/null 2>&1; do sleep 5; done
+
+              ${MYSQL} -e "CREATE DATABASE IF NOT EXISTS \`${MYSQL_DB}\`"
+
+              SYSBENCH_ARGS=(
+                --db-driver=mysql
+                --mysql-host="${MYSQL_HOST}"
+                --mysql-port="${MYSQL_PORT}"
+                --mysql-user="${MYSQL_USER}"
+                --mysql-password="${MYSQL_PASSWORD}"
+                --mysql-db="${MYSQL_DB}"
+                --mysql_storage_engine=innodb
+                --tables="${TABLES}"
+                --table-size="${TABLE_SIZE}"
+              )
+
+              # Only load the dataset once, so a pod restart resumes the run
+              # instead of rebuilding every table.
+              prepared=$(${MYSQL} -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${MYSQL_DB}' AND table_name='sbtest${TABLES}'")
+              if [ "${prepared}" != "1" ]; then
+                echo "preparing ${TABLES} tables of ${TABLE_SIZE} rows ..."
+                sysbench "/usr/share/sysbench/${WORKLOAD}.lua" "${SYSBENCH_ARGS[@]}" --threads="${THREADS}" prepare
+              else
+                echo "dataset already present, skipping prepare"
+              fi
+
+              echo "starting ${WORKLOAD} ..."
+              # time=0 + events=0 runs until the pod is deleted or scaled to 0.
+              exec sysbench "/usr/share/sysbench/${WORKLOAD}.lua" "${SYSBENCH_ARGS[@]}" \
+                --threads="${THREADS}" \
+                --rate="${RATE}" \
+                --time=0 \
+                --events=0 \
+                --report-interval=10 \
+                --rand-type=uniform \
+                --histogram=on \
+                run
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256M
+            limits:
+              memory: 512M

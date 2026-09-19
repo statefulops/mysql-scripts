@@ -1,0 +1,103 @@
+apiVersion: pxc.percona.com/v1
+kind: PerconaXtraDBCluster
+metadata:
+  name: cluster1
+  finalizers:
+    - percona.com/delete-pxc-pods-in-order
+spec:
+  crVersion: 1.20.0
+  tls:
+    enabled: true
+  updateStrategy: SmartUpdate
+  upgradeOptions:
+    versionServiceEndpoint: https://check.percona.com
+    apply: disabled
+    schedule: "0 4 * * *"
+  pxc:
+    size: 3
+    image: percona/percona-xtradb-cluster:8.4.8-8.1
+    autoRecovery: true
+    resources:
+      requests:
+        memory: 1G
+        cpu: 600m
+    affinity:
+      antiAffinityTopologyKey: "kubernetes.io/hostname"
+    podDisruptionBudget:
+      maxUnavailable: 1
+    volumeSpec:
+      persistentVolumeClaim:
+        resources:
+          requests:
+            storage: 6G
+    gracePeriod: 600
+  haproxy:
+    enabled: true
+    size: 3
+    image: percona/haproxy:2.8.18-1
+    resources:
+      requests:
+        memory: 1G
+        cpu: 600m
+    affinity:
+      antiAffinityTopologyKey: "kubernetes.io/hostname"
+    podDisruptionBudget:
+      maxUnavailable: 1
+    gracePeriod: 30
+  proxysql:
+    enabled: false
+    size: 3
+    image: percona/proxysql2:2.7.3-1.3
+    resources:
+      requests:
+        memory: 1G
+        cpu: 600m
+    affinity:
+      antiAffinityTopologyKey: "kubernetes.io/hostname"
+    volumeSpec:
+      persistentVolumeClaim:
+        resources:
+          requests:
+            storage: 2G
+    podDisruptionBudget:
+      maxUnavailable: 1
+    gracePeriod: 30
+  logcollector:
+    enabled: true
+    image: percona/fluentbit:5.0.6-1
+    resources:
+      requests:
+        memory: 100M
+        cpu: 200m
+  pmm:
+    enabled: false
+    image: percona/pmm-client:3.8.0
+    serverHost: monitoring-service
+    resources:
+      requests:
+        memory: 150M
+        cpu: 300m
+  backup:
+    image: percona/percona-xtrabackup:8.4.0-5.1
+    pitr:
+      enabled: true
+      storageName: s3-rustfs
+      timeBetweenUploads: 60
+      timeoutSeconds: 60
+    storages:
+      s3-rustfs:
+        type: s3
+        verifyTLS: true
+        s3:
+          bucket: my-kind-bucket
+          credentialsSecret: my-cluster-name-backup-s3
+          region: us-east-1
+          endpointUrl: http://rustfs-svc.rustfs.svc.cluster.local:9000
+    schedule:
+      - name: "daily-backup"
+        schedule: "0 0 * * *"
+        retention:
+          type: "count"
+          count: 5
+          deleteFromStorage: true
+        storageName: s3-rustfs
