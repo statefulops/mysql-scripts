@@ -3,7 +3,7 @@
 ## 1. Create the kind cluster
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/statefulops/kind-scripts/main/s3/create-cluster.sh | bash
+curl -fsSL https://raw.githubusercontent.com/statefulops/kind-scripts/main/s3/create-cluster.sh | bash -s -- v1.37.0 xtradb
 ```
 
 ## 2. Install the operator
@@ -13,7 +13,7 @@ helm repo add percona https://percona.github.io/percona-helm-charts/
 helm repo update
 
 kubectl create namespace pxc-operator
-helm install pxc-operator percona/pxc-operator --namespace pxc-operator
+helm install pxc-operator percona/pxc-operator --version 1.20.1 --namespace pxc-operator
 
 kubectl config set-context --current --namespace=pxc-operator
 ```
@@ -44,6 +44,8 @@ NAME       ENDPOINT                        STATUS   PXC   PROXYSQL   HAPROXY   A
 cluster1   cluster1-haproxy.pxc-operator   ready    3                3         5m23s
 ```
 
+__
+
 ## 4. Connect to the cluster
 
 Get the root password:
@@ -64,21 +66,26 @@ Inside the client pod:
 mysql -u root -p -h cluster1-haproxy
 ```
 
-## 5. Backups (S3 / RustFS)
+```sql
+mysql> select @@hostname
+    -> ;
++----------------+
+| @@hostname     |
++----------------+
+| cluster1-pxc-0 |
++----------------+
+1 row in set (0.00 sec)
 
-Get the RustFS admin secret key:
-
-```bash
-kubectl get secret rustfs-admin-credentials -n rustfs -o jsonpath='{.data.secret-key}'
+mysql>
 ```
+@TODO add overview etc
 
-Update `backup-secret-s3.yaml` with the current key (base64-encode the value from the previous command) before applying it — the secret is not created automatically.
+## 5. Backups ( RustFS)
 
-Create the backup S3 secret:
+Create the backup S3 secret from the RustFS admin credentials:
 
 ```bash
-kubectl apply -f backup-secret-s3.yaml
-# secret/my-cluster-name-backup-s3 created
+kubectl create secret generic my-cluster-name-backup-s3 --from-literal=AWS_ACCESS_KEY_ID="$(kubectl get secret rustfs-admin-credentials -n rustfs -o jsonpath='{.data.access-key}' | base64 -d)" --from-literal=AWS_SECRET_ACCESS_KEY="$(kubectl get secret rustfs-admin-credentials -n rustfs -o jsonpath='{.data.secret-key}' | base64 -d)" --dry-run=client -o yaml | kubectl apply -f -
 ```
 
 Run a backup:
@@ -112,17 +119,7 @@ export AWS_DEFAULT_REGION=us-east-1
 aws --endpoint-url http://localhost:9000 s3 ls my-kind-bucket/
 ```
 
-## 6. Binlog collection
 
-```bash
-kubectl apply -f cr-binlogs.yaml
-```
-
-Verify pods:
-
-```bash
-kubectl get po
-```
 
 ```
 NAME                             READY   STATUS      RESTARTS   AGE
@@ -135,4 +132,54 @@ cluster1-pxc-1                   3/3     Running     0          22m
 cluster1-pxc-2                   3/3     Running     0          20m
 pxc-operator-645854c986-65dvg    1/1     Running     0          25m
 xb-backup1-5l74d                 0/1     Completed   0          13m
+```
+## 7 Restore
+
+@todo do backup then pitr testing ?
+
+disable any pitr
+
+kubectl patch pxc cluster1  \
+  --type merge \
+  -p '{"spec":{"backup":{"pitr":{"enabled":false}}}}'
+
+
+  cat <<EOF | kubectl apply -f-
+apiVersion: "pxc.percona.com/v1"
+kind: "PerconaXtraDBClusterRestore"
+metadata:
+  name: "restore1"
+spec:
+  pxcCluster: "cluster1"
+  backupName: "backup1"
+EOF
+
+point in time 
+
+cat <<EOF | kubectl apply -f-
+apiVersion: "pxc.percona.com/v1"
+kind: "PerconaXtraDBClusterRestore"
+metadata:
+  name: "restore1"
+spec:
+  pxcCluster: "cluster1"
+  backupName: "backup1"
+  pitr:
+    type: date
+    date: "2020-12-31 09:37:13"
+    backupSource:
+      storageName: "s3-rustfs"
+EOF
+
+
+## 6. Binlog collection
+
+```bash
+kubectl apply -f cr-binlogs.yaml
+```
+
+Verify pods:
+
+```bash
+kubectl get po
 ```

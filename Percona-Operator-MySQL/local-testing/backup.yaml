@@ -1,0 +1,9 @@
+apiVersion: ps.percona.com/v1
+kind: PerconaServerMySQLBackup
+metadata:
+  finalizers:
+   - percona.com/delete-backup
+  name: backup2
+spec:
+  clusterName: ps-cluster1
+  storageName: s3-rustfs
