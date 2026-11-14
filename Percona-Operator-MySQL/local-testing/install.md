@@ -1,6 +1,12 @@
-# Percona XtraDB Cluster Operator — Install Notes
+# Local testing on kind
+
+Notes for bringing up a PXC cluster on a local [kind](https://kind.sigs.k8s.io/)
+cluster with a MinIO-backed S3 bucket, then exercising backups and binlog
+collection.
 
 ## 1. Create the kind cluster
+
+Creates the kind cluster plus a local MinIO S3 endpoint on `localhost:9000`.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/statefulops/kind-scripts/main/s3/create-cluster.sh | bash
@@ -8,40 +14,42 @@ curl -fsSL https://raw.githubusercontent.com/statefulops/kind-scripts/main/s3/cr
 
 ## 2. Install the operator
 
+Add the Percona Helm repo:
+
 ```bash
 helm repo add percona https://percona.github.io/percona-helm-charts/
 helm repo update
-
-kubectl create namespace pxc-operator
-helm install pxc-operator percona/pxc-operator --namespace pxc-operator
-
-kubectl config set-context --current --namespace=pxc-operator
 ```
+
+Safety check — only ever run this against a local kind cluster:
+
+```bash
+CURRENT_CONTEXT=$(kubectl config current-context)
+case "$CURRENT_CONTEXT" in
+  *kind*) echo "OK: using kind context '$CURRENT_CONTEXT'" ;;
+  *) echo "ABORT: context '$CURRENT_CONTEXT' is not a kind cluster"; exit 1 ;;
+esac
+```
+
+> Inside an interactive shell, use `return 1` instead of `exit 1` so a failed
+> check does not close the terminal.
+
+Install the operator and switch to its namespace:
+
+```bash
+kubectl create namespace ps-operator
+helm install ps-operator percona/ps-operator --namespace ps-operator
+
+kubectl config set-context --current --namespace=ps-operator
+```
+
+=-====
 
 ## 3. Deploy the cluster
 
 ```bash
 kubectl apply -f cr.yaml
-```
-
-Check status:
-
-```bash
-kubectl get perconaxtradbcluster
-```
-
-While initializing:
-
-```
-NAME       ENDPOINT                        STATUS         PXC   PROXYSQL   HAPROXY   AGE
-cluster1   cluster1-haproxy.pxc-operator   initializing   1                3         3m16s
-```
-
-Once ready:
-
-```
-NAME       ENDPOINT                        STATUS   PXC   PROXYSQL   HAPROXY   AGE
-cluster1   cluster1-haproxy.pxc-operator   ready    3                3         5m23s
+ 
 ```
 
 ## 4. Connect to the cluster
@@ -49,51 +57,49 @@ cluster1   cluster1-haproxy.pxc-operator   ready    3                3         5
 Get the root password:
 
 ```bash
-kubectl get secret cluster1-secrets --template='{{.data.root | base64decode}}{{"\n"}}'
+export NAMESPACE=ps-operator
+export CLUSTER_NAME=ps-cluster1
+export SECRET_NAME=${CLUSTER_NAME}-psuser-root
+
+kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" \
+ -o jsonpath='{.data.user}' | base64 --decode && echo 
+ 
+kubectl get secret "$SECRET_NAME" -n "$NAMESPACE" -o jsonpath='{.data.password}' | base64 --decode && echo
+
 ```
 
 Launch a client pod and connect:
 
 ```bash
-kubectl run -i --rm --tty percona-client --image=percona/percona-xtradb-cluster:8.4 --restart=Never -- bash -il
+kubectl run -n $NAMESPACE -i --rm --tty percona-client \
+--image=percona/percona-server:8.4 --restart=Never -- bash -il
 ```
 
 Inside the client pod:
 
 ```bash
-mysql -u root -p -h cluster1-haproxy
+mysql -u root -p -h ps-cluster1-haproxy
 ```
 
-## 5. Backups (S3 / RustFS)
 
-Get the RustFS admin secret key:
+## 4. Take a backup
 
-```bash
 kubectl get secret rustfs-admin-credentials -n rustfs -o jsonpath='{.data.secret-key}'
-```
 
-Update `backup-secret-s3.yaml` with the current key (base64-encode the value from the previous command) before applying it — the secret is not created automatically.
 
-Create the backup S3 secret:
 
 ```bash
-kubectl apply -f backup-secret-s3.yaml
-# secret/my-cluster-name-backup-s3 created
-```
-
-Run a backup:
-
-```bash
+kubectl apply -f backup-secret-s3.yaml   # secret/my-cluster-name-backup-s3 created
 kubectl apply -f backup.yaml
 ```
 
-Check backup logs:
+Follow the backup job's logs (substitute your own pod name):
 
 ```bash
 kubectl logs xb-backup1-5l74d
 ```
 
-```
+```text
 ...
 + GARBD_EXIT_CODE=0
 + case ${GARBD_EXIT_CODE} in
@@ -102,7 +108,7 @@ kubectl logs xb-backup1-5l74d
 2026-09-18 08:44:17 [INFO] Backup was finished successfully
 ```
 
-Verify the backup landed in S3:
+## 5. Verify the backup in MinIO
 
 ```bash
 export AWS_ACCESS_KEY_ID=myadminuser
@@ -112,19 +118,16 @@ export AWS_DEFAULT_REGION=us-east-1
 aws --endpoint-url http://localhost:9000 s3 ls my-kind-bucket/
 ```
 
-## 6. Binlog collection
+## 6. Enable binlog collection
 
 ```bash
 kubectl apply -f cr-binlogs.yaml
-```
-
-Verify pods:
-
-```bash
 kubectl get po
 ```
 
-```
+A `-pitr-` pod appears once binlog collection is running:
+
+```text
 NAME                             READY   STATUS      RESTARTS   AGE
 cluster1-haproxy-0               2/2     Running     0          24m
 cluster1-haproxy-1               2/2     Running     0          22m

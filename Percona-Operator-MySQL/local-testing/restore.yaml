@@ -1,0 +1,10 @@
+apiVersion: pxc.percona.com/v1
+kind: PerconaXtraDBClusterRestore
+metadata:
+  name: restore2
+spec:
+  pxcCluster: cluster1
+  pitr:
+    type: latest
+    backupSource:
+      storageName: s3-rustfs
